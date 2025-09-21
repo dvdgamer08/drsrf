@@ -1,13 +1,16 @@
--- must start with loading the ac_common etc implicitly
--- this script will run on client via CSP
+-- helloworld.lua
 
-function script.draw()
-    -- draw something simple on screen
-    ac.debugOverlay("mpis pe mm", 10, 10)
+-- Get config parameters passed via server
+local params = script_params or {}  -- depending on exact API naming
+local foo = params.PARAM_FOO or "default foo"
+local bar = params.PARAM_BAR or "default bar"
+
+-- Example: when session starts, display a chat message
+function ac.onSessionStart()
+    ac.msg("Hello from online script! foo=" .. tostring(foo) .. ", bar=" .. tostring(bar))
 end
 
-function script.update(dt)
-    -- maybe respond to some state
-    local speed = ac.getCarState(0).speedKmh -- example
-    -- store or draw etc
+-- Optionally do something per frame
+function ac.onUpdate(dt)
+    -- nothing for now
 end
