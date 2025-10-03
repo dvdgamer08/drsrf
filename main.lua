@@ -1,5 +1,5 @@
--- DRS_Start.lua - USING COMFY MAP'S EXACT APPROACH
--- This uses the same teleportation system that works in Comfy Map
+-- DRS_Start.lua - USING PITS TELEPORT + MANUAL POSITIONING
+-- Workaround for missing teleport API
 
 local STATE_IDLE = 0
 local STATE_COUNTDOWN = 1
@@ -13,10 +13,12 @@ local TELEPORT_NAME = "HC_Start0"
 local timer = COUNTDOWN_SECONDS
 local startmsgTimer = 0
 
--- Teleportation system (EXACT COPY from Comfy Map)
+-- Teleportation system
 local teleports = {}
-local targetTeleportIndex = nil
+local targetTeleport = nil
 local teleportsLoaded = false
+local teleportPending = false
+local teleportStage = 0 -- 0=idle, 1=to pits, 2=to destination
 
 -- Enhanced debug system
 local logs = {}
@@ -24,10 +26,10 @@ local function debug(msg)
     local line = string.format("[%.2f] %s", os.clock(), msg)
     table.insert(logs, 1, line)
     if #logs > 10 then table.remove(logs) end
-    print("DRS_DEBUG: " .. msg) -- Also print to console
+    print("DRS_DEBUG: " .. msg)
 end
 
--- EXACT COPY of Comfy Map's loadTeleports function (this definitely works!)
+-- EXACT COPY of Comfy Map's loadTeleports function
 local function loadTeleports(ini, online)
   debug("Loading teleports using Comfy Map method...")
   local teleports, sorted_teleports = {}, {}
@@ -72,7 +74,6 @@ local function loadTeleportDestinations()
     
     if not ac.INIConfig.onlineExtras then
         debug("ERROR: onlineExtras config not available")
-        debug("This means the script is not running in proper online mode")
         return
     end
     
@@ -85,21 +86,22 @@ local function loadTeleportDestinations()
     -- Find our target teleport
     for index, teleport in ipairs(teleports) do
         if teleport.POINT == TELEPORT_NAME then
-            targetTeleportIndex = teleport.INDEX
-            debug(string.format("SUCCESS: Found target teleport '%s' at index %d", TELEPORT_NAME, targetTeleportIndex))
-            debug(string.format("Teleport position: %.1f, %.1f, %.1f", teleport.POS.x, teleport.POS.y, teleport.POS.z))
+            targetTeleport = teleport
+            debug(string.format("SUCCESS: Found target teleport '%s'", TELEPORT_NAME))
+            debug(string.format("Position: %.1f, %.1f, %.1f", teleport.POS.x, teleport.POS.y, teleport.POS.z))
+            debug(string.format("Heading: %.1f°", teleport.HEADING))
             break
         end
     end
     
-    if not targetTeleportIndex then
+    if not targetTeleport then
         debug("WARNING: Target teleport '" .. TELEPORT_NAME .. "' not found!")
         debug("Available teleports:")
         for _, t in ipairs(teleports) do
-            debug(string.format("  - %s (index: %d)", t.POINT, t.INDEX))
+            debug(string.format("  - %s (pos: %.1f, %.1f, %.1f)", t.POINT, t.POS.x, t.POS.y, t.POS.z))
         end
     else
-        debug("Teleport system ready - target index: " .. targetTeleportIndex)
+        debug("Teleport system ready - target coordinates loaded")
     end
     
     teleportsLoaded = true
@@ -109,7 +111,6 @@ end
 local function checkTeleportAPI()
     debug("=== TELEPORT API CHECK ===")
     
-    -- Check all potentially relevant functions
     local apiFunctions = {
         'teleportToServerPoint',
         'canTeleportToServerPoint', 
@@ -133,63 +134,91 @@ local function checkTeleportAPI()
     return #availableFunctions > 0
 end
 
--- Attempt teleport using Comfy Map's direct approach
+-- Calculate direction vector from heading
+local function headingToDirection(heading)
+    local rad = math.rad(heading)
+    return vec3(math.sin(rad), 0, math.cos(rad))
+end
+
+-- Two-stage teleport: first to pits, then to destination
 local function attemptTeleport()
     if not teleportsLoaded then
         debug("ERROR: Teleports not loaded yet")
         return false
     end
     
-    if targetTeleportIndex == nil then
-        debug("ERROR: No target teleport index available")
+    if targetTeleport == nil then
+        debug("ERROR: No target teleport data available")
         return false
     end
     
-    debug(string.format("Attempting teleport to '%s' (index: %d)", TELEPORT_NAME, targetTeleportIndex))
+    debug("Starting two-stage teleport process...")
+    debug(string.format("Target: %s at (%.1f, %.1f, %.1f) heading %.1f°", 
+        TELEPORT_NAME, targetTeleport.POS.x, targetTeleport.POS.y, targetTeleport.POS.z, targetTeleport.HEADING))
     
-    -- Use the EXACT same approach Comfy Map uses
-    if ac.teleportToServerPoint then
-        debug("ac.teleportToServerPoint IS AVAILABLE - calling function...")
-        
-        -- Optional: Check if teleport is available (like Comfy Map does)
-        if ac.canTeleportToServerPoint then
-            if ac.canTeleportToServerPoint(targetTeleportIndex) then
-                debug("Teleport point is available - proceeding...")
-            else
-                debug("WARNING: Teleport point is blocked or unavailable")
-                -- Comfy Map still attempts teleport even if blocked
-            end
-        end
-        
-        -- THIS IS THE EXACT CALL COMFY MAP MAKES
-        ac.teleportToServerPoint(targetTeleportIndex)
-        debug("Teleport command executed successfully")
+    -- Stage 1: Teleport to pits using available function
+    if ac.tryToTeleportToPits then
+        debug("Stage 1: Teleporting to pits...")
+        ac.tryToTeleportToPits()
+        teleportPending = true
+        teleportStage = 1
+        debug("Pits teleport initiated - waiting for completion...")
         return true
     else
-        debug("CRITICAL ERROR: ac.teleportToServerPoint is NOT available")
-        debug("This suggests the script environment is different from Comfy Map")
+        debug("CRITICAL: ac.tryToTeleportToPits not available")
         return false
     end
 end
 
--- Check if teleport point is occupied (like Comfy Map does)
+-- Manual position setting (fallback method)
+local function setCarPositionManual()
+    if not targetTeleport then
+        debug("ERROR: No target teleport for manual positioning")
+        return false
+    end
+    
+    debug("Attempting manual position set...")
+    
+    -- Get current car
+    local car = ac.getCar(0)
+    if not car then
+        debug("ERROR: Could not get car reference")
+        return false
+    end
+    
+    -- Set position and orientation
+    debug(string.format("Setting position to: %.1f, %.1f, %.1f", 
+        targetTeleport.POS.x, targetTeleport.POS.y, targetTeleport.POS.z))
+    
+    -- Use physics to set car position
+    if physics.setCarPosition then
+        local direction = headingToDirection(targetTeleport.HEADING)
+        physics.setCarPosition(0, targetTeleport.POS, direction)
+        debug("Manual position set via physics.setCarPosition")
+        return true
+    else
+        debug("WARNING: physics.setCarPosition not available")
+        
+        -- Last resort: try direct property assignment (may not work in online)
+        car.position = targetTeleport.POS
+        debug("Position set via direct assignment (may not work online)")
+        return true
+    end
+end
+
+-- Check if teleport point is occupied
 local function checkTeleportAvailability()
-    if targetTeleportIndex == nil then 
-        debug("Cannot check availability - no target index")
+    if targetTeleport == nil then 
+        debug("Cannot check availability - no target data")
         return nil 
     end
     
     for i = 0, ac.getSim().carsCount - 1 do
         local car = ac.getCar(i)
         if car and car.isConnected then
-            for _, teleport in ipairs(teleports) do
-                if teleport.INDEX == targetTeleportIndex then
-                    if car.position:distance(teleport.POS) < 6 then
-                        debug(string.format("Teleport blocked by: %s", ac.getDriverName(i)))
-                        return ac.getDriverName(i)
-                    end
-                    break
-                end
+            if car.position:distance(targetTeleport.POS) < 6 then
+                debug(string.format("Teleport blocked by: %s", ac.getDriverName(i)))
+                return ac.getDriverName(i)
             end
         end
     end
@@ -197,7 +226,7 @@ local function checkTeleportAvailability()
 end
 
 function script.drawUI()
-    ui.beginTransparentWindow("DRS_StartWindow", vec2(30, 100), vec2(350, 280))
+    ui.beginTransparentWindow("DRS_StartWindow", vec2(30, 100), vec2(350, 300))
     
     -- State display
     ui.pushFont(ui.Font.Main)
@@ -215,8 +244,11 @@ function script.drawUI()
     -- Teleport status
     ui.text("Teleport Target: " .. TELEPORT_NAME)
     
-    if targetTeleportIndex ~= nil then
-        ui.textColored("✓ Server Index: " .. targetTeleportIndex, rgbm(0, 1, 0, 1))
+    if targetTeleport ~= nil then
+        ui.textColored("✓ Coordinates Loaded", rgbm(0, 1, 0, 1))
+        ui.text(string.format("Position: %.1f, %.1f, %.1f", 
+            targetTeleport.POS.x, targetTeleport.POS.y, targetTeleport.POS.z))
+        ui.text(string.format("Heading: %.1f°", targetTeleport.HEADING))
         
         local occupiedBy = checkTeleportAvailability()
         if occupiedBy then
@@ -225,18 +257,18 @@ function script.drawUI()
             ui.textColored("✓ Position Available", rgbm(0, 1, 0, 1))
         end
         
-        -- API status
-        if ac.teleportToServerPoint then
-            ui.textColored("✓ ac.teleportToServerPoint: AVAILABLE", rgbm(0, 1, 0, 1))
-            if ac.canTeleportToServerPoint then
-                if ac.canTeleportToServerPoint(targetTeleportIndex) then
-                    ui.textColored("✓ Teleport Point: ACCESSIBLE", rgbm(0, 1, 0, 1))
-                else
-                    ui.textColored("✗ Teleport Point: BLOCKED", rgbm(1, 1, 0, 1))
-                end
-            end
+        -- Teleport method status
+        ui.separator()
+        ui.text("Teleport Method:")
+        if ac.tryToTeleportToPits then
+            ui.textColored("✓ Pits Teleport Available", rgbm(0, 1, 0, 1))
+            ui.text("Method: Pits → Destination")
         else
-            ui.textColored("✗ ac.teleportToServerPoint: MISSING", rgbm(1, 0, 0, 1))
+            ui.textColored("✗ No Teleport Methods", rgbm(1, 0, 0, 1))
+        end
+        
+        if teleportPending then
+            ui.textColored("Teleport in progress... Stage: " .. teleportStage, rgbm(1, 1, 0, 1))
         end
     else
         ui.textColored("✗ Teleport: NOT FOUND", rgbm(1, 0, 0, 1))
@@ -248,6 +280,12 @@ function script.drawUI()
     if ui.button("Manual Teleport Now", vec2(ui.windowWidth() - 20, 25)) then
         debug("Manual teleport triggered via button")
         attemptTeleport()
+    end
+    
+    -- Manual position set button (fallback)
+    if ui.button("Set Position Only (Fallback)", vec2(ui.windowWidth() - 20, 25)) then
+        debug("Manual position set triggered")
+        setCarPositionManual()
     end
     
     ui.separator()
@@ -265,7 +303,7 @@ function script.update(dt)
     -- Initialize on first update
     if not teleportsLoaded then
         debug("DRS Start script initializing...")
-        debug("Script version: Comfy Map Method")
+        debug("Script version: Pits Teleport Workaround")
         debug("CSP Version: " .. (ac.getPatchVersionCode() or "Unknown"))
         
         -- Check what API functions are available
@@ -276,6 +314,22 @@ function script.update(dt)
             loadTeleportDestinations()
         else
             debug("CRITICAL: onlineExtras not available - script may not be running in online mode")
+        end
+    end
+    
+    -- Handle pending teleport
+    if teleportPending then
+        if teleportStage == 1 then
+            -- Wait a bit for pits teleport to complete, then move to destination
+            debug("Waiting for pits teleport to complete...")
+            teleportStage = 2
+        elseif teleportStage == 2 then
+            -- Now set the actual position
+            debug("Pits teleport should be complete, setting final position...")
+            setCarPositionManual()
+            teleportPending = false
+            teleportStage = 0
+            debug("Two-stage teleport completed!")
         end
     end
     
@@ -294,11 +348,11 @@ function script.update(dt)
         -- Teleport at 10 seconds
         if timer <= 10 and timer + dt > 10 then
             debug("=== COUNTDOWN REACHED 10s ===")
-            debug("Attempting automatic teleport...")
+            debug("Attempting two-stage teleport...")
             local success = attemptTeleport()
             if success then
-                ac.setMessage("✓ Teleported to start position!")
-                debug("Teleport successful!")
+                ac.setMessage("✓ Teleporting to start position...")
+                debug("Teleport initiated successfully!")
             else
                 ac.setMessage("✗ Teleport failed - check debug log")
                 debug("Teleport failed - see logs above")
@@ -332,10 +386,14 @@ function script.chat(message)
         checkTeleportAPI()
         loadTeleportDestinations()
         return true
+    elseif message == "!setpos" then
+        debug("Manual position set via chat")
+        setCarPositionManual()
+        return true
     end
     return false
 end
 
 -- Initialization
 debug("=== DRS START SCRIPT LOADED ===")
-debug("Using Comfy Map's proven teleportation system")
+debug("Using Pits Teleport + Manual Positioning Workaround")
